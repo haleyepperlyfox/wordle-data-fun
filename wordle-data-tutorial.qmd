@@ -1,0 +1,499 @@
+---
+title: "Wordle data visualization"
+author: Haley Fox
+date: August 3, 2022
+toc: true
+toc-depth: 3
+number-sections: true
+number-depth: 3
+format: html
+editor: visual
+---
+
+## Objective
+
+Visualize Wordle data in fun ways! If you don't know, Wordle is a web-based word game created and developed by Welsh software engineer Josh Wardle, and owned and published by The New York Times Company since 2022.
+
+## Steps
+
+1.  Web scrape past Wordle words and word rankings (i.e., word commonness) using `rvest`.
+
+2.  Use Twitter's API and `rtweet` to read in tweets from a bot (@WordleStats) that summarizes all Wordle score distributions posted on Twitter.
+
+3.  Visualize different aspects of the data using a word cloud, stacked bar plot, scatterplot, and lollipop plot.
+
+## About the data 
+
+Data used in this script are from a list of previous Wordle words from [FresherLive](https://latestnews.fresherslive.com/articles/past-wordle-words-list-of-all-past-wordle-answers-can-i-play-past-wordles-354332){target="_blank"}, a measure of word commonness from [datayze](https://datayze.com/word-analyzer?){target="_blank"}, and Wordle score distributions from the Twitter bot [\@WordleStats](https://twitter.com/WordleStats){target="_blank"}.
+
+[Github repo](https://github.com/haleyepperlyfox/wordle-data-fun){target="_blank"}
+
+## Scraping and formatting 🧹
+
+### Load libraries and read in data
+
+```{r}
+#| label: load-packages
+#| message: false
+if (!require(librarian)) {
+  install.packages("librarian")
+  library(librarian)
+}
+librarian::shelf(tidyverse,
+                 rtweet,
+                 wordcloud,
+                 RColorBrewer,
+                 here,
+                 scales)
+```
+
+### Scrape and format previous Wordle words
+
+This [website](https://latestnews.fresherslive.com/articles/past-wordle-words-list-of-all-past-wordle-answers-can-i-play-past-wordles-354332){target="_blank"} includes a table with the previous Wordle words and associated date.
+
+Scrape data from website using `rvest`.
+
+```{r}
+#| label: scrape-words
+#| code-overflow: wrap
+scrape_words <- rvest::read_html("https://latestnews.fresherslive.com/articles/past-wordle-words-list-of-all-past-wordle-answers-can-i-play-past-wordles-354332")
+words_table <- rvest::html_table(scrape_words) %>% 
+  purrr::flatten_df() %>% 
+  dplyr::slice(-1) %>% 
+  janitor::row_to_names(1) %>% 
+  as.data.frame()
+
+#view data
+head(words_table)
+```
+
+This website includes the date of each Wordle, but it presents dates in multiple formats. From January 1 through March 1, dates are reported as day-month-year. From March 2 - present, dates are reported as month-day-year. We need to convert the date column into the correct date format.
+
+```{r}
+#| label: date-format
+#| code-overflow: wrap
+#find row number for the last row where date is in mdy format (corresponds to word = NASTY)
+row <- row.names(words_table[which(words_table$Answers=="NASTY"),]) %>% 
+  as.numeric()
+
+#split into two data frames, convert to date format based on day-month-year or month-day-year, rowbind the two dataframes back together
+df1 <- words_table %>% 
+  filter(row.names(words_table) %in% (row + 1):nrow(words_table)) %>% 
+  mutate(Date = lubridate::dmy(Date))
+
+words_table_2 <- words_table %>% 
+  filter(row.names(words_table) %in% 1:row) %>% 
+  mutate(Date = lubridate::mdy(Date)) %>% 
+  rbind(df1) %>% 
+  rename(word = Answers, date = Date)
+```
+
+Convert words from uppercase to lowercase using `tolower`.
+
+```{r}
+#| label: lowercase
+#| code-overflow: wrap
+words_table_2$word <- tolower(words_table_2$word)
+
+#view data
+head(words_table_2)
+```
+
+### Scrape and format word rank (i.e., commonness)
+
+This [website](https://datayze.com/word-analyzer?){target="_blank"} includes a table with various metrics associated with words, including word rank.
+
+**What is word rank?**
+
+::: callout-note
+From the [website](https://datayze.com/word-analyzer?){target="_blank"}: "Determining Word Rank: The word rank metric is a measure of word frequency, with frequent words corresponding to higher ranks. In order to get an accurate frequency count of each word, we utilize a stemmer to identify the morphological root form of a word. This allows us to group slight variations of the same word. For example, 'cats' and 'cat' both have the same stem, as do 'readability' and 'readable.' For most words, familiarity with said word is independent of count (e.g. the singular form vs the plural form) or part of speech (e.g. adjective form vs the noun form). In some rare cases, however, a common word may have multiple meanings including a meaning so infrequent it is not well known. We then calculate word frequency using the data from Project Gutenberg which is a large collection of freely available English documents and summing the counts for all variations of the word corresponding to the same stem."
+:::
+
+*Higher ranks means closer to 1 (first rank), so not actually larger numbers (e.g., 1 is higher ranked than 100, and therefore associated with a more common word).*
+
+Create vector of previous Wordle words to run through the word rank website.
+
+```{r}
+#| label: word-list
+#| code-overflow: wrap
+word_list <- words_table_2$word
+```
+
+Run through a for loop that takes each word, looks up that word on the datayze website, reads into R the table with word rank, formats the data, and binds all words/ranks into one df.
+
+```{r}
+#| label: scrape-rank
+#| code-overflow: wrap
+#create empty dataframe to store output
+rank_table <- data.frame()
+
+#for loop
+for(word in word_list){
+url <- sprintf('https://datayze.com/word-analyzer?word=%s', word)
+url_scrape <- rvest::read_html(url)
+new_rank_table <- rvest::html_table(url_scrape) %>% 
+  purrr::flatten_df() %>% 
+  dplyr::filter(X1 == "Word Rank:") %>% 
+  mutate(word = word) %>% 
+  rename(rank = X2) %>% 
+  select(-1) %>% 
+  as.data.frame() 
+new_rank_table$rank <- stringi::stri_replace_all_regex(new_rank_table$rank, pattern = c("st", "rd", "th", "nd"),
+                                  replacement = c("", "", "", ""),
+                                  vectorize = FALSE)
+rank_table <- rbind(new_rank_table, rank_table)
+}
+
+#view data
+head(rank_table)
+```
+
+Remove NAs, which are input as "-". These are because not all words have word ranks on the website.
+
+```{r}
+#| label: remove-na
+#| code-overflow: wrap
+rank_table_no_NA <- rank_table %>% 
+  filter(!(rank == "-"))
+```
+
+Left join the word ranks dataframe that we just created with the dataframe of past Wordle words and dates we previously created. A left join will only keep the rows for which we have word rank.
+
+```{r}
+#| label: join-dfs
+#| code-overflow: wrap
+words_dates_ranks <- left_join(rank_table_no_NA, words_table_2, by = "word")
+
+#view data
+head(words_dates_ranks)
+```
+
+### Use Twitter 🐦 API to read in Wordle scores
+
+There is a bot on Twitter that posts daily Wordle score distributions [\@WordleStats](https://twitter.com/WordleStats){target="_blank"}. We can interact with the Twitter API to download the timeline (all tweets) from that bot.
+
+Getting authorized to use the Twitter API is typically fairly simple. Here is a great [tutorial](https://cran.r-project.org/web/packages/rtweet/vignettes/auth.html){target="_blank"} about setting up a Twitter development account and connecting to the Twitter API in RStudio.
+
+::: callout-warning
+I had a difficult time getting R to interact with the Twitter API and ended up having to apply for elevated access in my Twitter development account before it worked.
+:::
+
+Set up authorization to work with the Twitter API and save credentials so that they can be read in each time you re-open the script. This is all outlined in this ([tutorial](https://cran.r-project.org/web/packages/rtweet/vignettes/auth.html){target="_blank"}).
+
+```{r}
+#| label: twitter-authorization
+#| message: false
+#| code-overflow: wrap
+#enter in your bearer token from your Twitter app on your development page when prompted
+# auth <- rtweet_app() #only do this once
+# auth_save(auth, "wordle-auth") #only do this once
+
+#then read in auth using this line of code each time
+auth_as("wordle-auth")
+```
+
+Read in all tweets from @Wordlestats.
+
+```{r}
+#| label: read-tweets
+#| code-overflow: wrap
+tweets <- get_timeline("WordleStats", n = Inf)
+
+#view data
+head(tweets$text)
+```
+
+Format the data to separate the components of interest (date, number of people posting results on twitter, percent people that guessed correctly after each number of guesses).
+
+```{r}
+#| label: format-tweets-1
+#| message: false
+#| code-overflow: wrap
+#| output: false
+
+#separate tweets into date, number of results found on twitter, number of people playing in hard mode, and the % of people for each number of guesses including those that never got the answer right
+tweets_separated <- tweets %>% 
+  select(text) %>% 
+  separate(col = text, sep='\n', into=c('date','number_results','hard_mode','empty','one_guess', 'two_guess','three_guess','four_guess','five_guess','six_guess', 'failed'), remove=TRUE) 
+```
+
+```{r}
+#| label: view-data
+#| code-overflow: wrap
+#view data
+head(tweets_separated)
+```
+
+```{r}
+#| label: format-tweets-2
+#| code-overflow: wrap
+
+#use string extract to extract only the percentage of respondents for each number of guesses
+#(\\d+) is the sign for any number of digits
+tweets_separated[,c(5:11)] <-lapply(tweets_separated[,c(5:11)], str_extract, pattern = '(\\d+)(%)')
+
+#remove the percentage signs
+tweets_separated[,c(5:11)] <-lapply(tweets_separated[,c(5:11)], gsub, pattern = '%', replacement = "")
+
+#remove additional characters that we don't want and convert the date to date format
+tweets_final <- tweets_separated %>% 
+  select(-empty) %>% 
+  mutate(date = gsub('#Wordle (\\d+) ', "", date)) %>% 
+  mutate(number_results = gsub(' results found on Twitter.', "", number_results)) %>% 
+  mutate(number_results = gsub(',', "", number_results)) %>% 
+  mutate(hard_mode = gsub(' hard mode players.', "", hard_mode)) %>% 
+  mutate(hard_mode = gsub(',', "", hard_mode))  %>% 
+  mutate(date = lubridate::ymd(date)) 
+
+#you get a warning that a few rows failed to parse. These are rows where the tweet did not follow the typical format.
+
+#view data
+head(tweets_final)
+
+#remove rows with NA for any column (these are the ones that failed to parse)
+tweets_final <- na.omit(tweets_final)
+```
+
+Merge dataframe with word, rank, and date with the newly created score distribution dataframe by date. First visualize the two dataframes that we're combining.
+
+```{r}
+#| label: join-dfs-2
+#| code-overflow: wrap
+head(words_dates_ranks)
+head(tweets_final)
+
+wordle_data <- left_join(words_dates_ranks, tweets_final, by = "date") %>% 
+  na.omit()
+
+#view data
+head(wordle_data)
+```
+
+::: callout-note
+If one of the previous websites we've used to scrape data stops working, and you still want to proceed with the visualizations, you can read in the csv saved in the github [repo](https://github.com/haleyepperlyfox/wordle-data-fun){target="_blank"}.
+
+`wordle_data1 <- read_csv(here("wordle_data_August_2_2022"))`
+
+This dataframe has data last downloaded on August 2, 2022.
+:::
+
+## Data visualization 📊
+
+### "Letter" cloud
+
+For our first data visualization, let's make a word cloud. Instead of words though, let's show letters in our cloud to see which letters are most commonly used.
+
+Separate each word into its five letters.
+
+```{r}
+#| label: separate-letters
+#| code-overflow: wrap
+letters <- wordle_data %>% 
+  select(word) %>% 
+  extract(word, into = c('one','two','three','four','five'), regex = "([a-z])([a-z])([a-z])([a-z])([a-z])")
+
+#view data
+head(letters)
+```
+
+Change the format from wide to long using `pivot_longer`.
+
+```{r}
+#| label: wide-to-long
+#| code-overflow: wrap
+letters_col <- letters %>% 
+  pivot_longer(c(1:5)) %>% 
+  select(-name) %>% 
+  rename(letter = value)
+
+#view data
+head(letters_col)
+```
+
+Make a frequency table for how many times each letter appears in a Wordle word.
+
+```{r}
+#| label: freq-table
+#| code-overflow: wrap
+letters_freq <- plyr::count(letters_col, 'letter')
+
+#view data
+letters_freq
+```
+
+Create the word (letter) cloud.
+
+```{r}
+#| label: letter-cloud
+#| code-overflow: wrap
+wordcloud(words = letters_freq$letter, freq = letters_freq$freq, min.freq = 0, random.order=FALSE, rot.per=0, colors=brewer.pal(8, "Dark2"))
+```
+
+### Stacked barplot
+
+Now let's find out if less common words are harder to guess? We'll do this by plotting the average number of guesses by word rank (i.e., word commonness).
+
+Convert variables from character to numeric.
+
+```{r}
+#| label: convert-to-numeric
+#| code-overflow: wrap
+wordle_data[,c(1, 4, 6:12)] <- lapply(wordle_data[,c(1, 4, 6:12)], as.numeric)
+```
+
+Create three groups for word rank from most to least common. We do this by grouping rows into the bottom, middle, and top 1/3 of all data by word rank. We also use `case_when` here, which is very similar to `ifelse`.
+
+```{r}
+#| label: rank-groups
+#| code-overflow: wrap
+wordle_data_grp_rank <- wordle_data %>% 
+ mutate(rank_group = case_when(rank < quantile(rank, prob = .333) ~ "more common",
+                               rank > quantile(rank, prob = .666) ~ "less common",
+                               TRUE ~ "medium"))
+```
+
+Relevel the word rank groups from more to less common. This is important for plotting in the correct order.
+
+```{r}
+#| label: relevel-rank-groups
+#| code-overflow: wrap
+wordle_data_grp_rank$rank_group <- as.factor(wordle_data_grp_rank$rank_group)
+wordle_data_grp_rank$rank_group <- forcats::fct_relevel(wordle_data_grp_rank$rank_group, "more common", "medium", "less common")
+```
+
+Change the format from wide to long for percent of people in each number of guesses category.
+
+```{r}
+#| label: wide-to-long-2
+#| code-overflow: wrap
+wordle_data_long_guess <- wordle_data_grp_rank %>%
+  pivot_longer(cols = c(6:12), names_to = "guess_number", values_to = "percent")
+```
+
+Relevel the guess number categories (e.g., 1 guess, 2 guesses, etc.) from more to less guesses. This is important for plotting in the correct order.
+
+```{r}
+#| label: relevel-guess-number
+#| code-overflow: wrap
+wordle_data_long_guess$guess_number <- as.factor(wordle_data_long_guess$guess_number)
+wordle_data_long_guess$guess_number <- forcats::fct_relevel(wordle_data_long_guess$guess_number, "failed", "six_guess", "five_guess", "four_guess", "three_guess", "two_guess", "one_guess")
+
+```
+
+To calculate the average number of guesses for each word rank group, we have to sum the percent of respondents for each number of guesses, and divide by the sum of word guess percentages for all words.
+
+```{r}
+#| label: avg-percent-per-guess
+#| code-overflow: wrap
+# ((length(wordle_data_long_guess$rank_group)/3)/7) calculates number of words per work rank group
+# times that value by 100 to get the sum of word guess percentages for all words
+x <- ((length(wordle_data_long_guess$rank_group)/3)/7)*100
+
+# calculate the average percentage of people for each number of guesses for each word rank group
+wordle_data_avg_percent <- wordle_data_long_guess %>% 
+  group_by(rank_group, guess_number) %>% 
+  mutate(avg_percent = 100*(sum(percent))/x)
+```
+
+Subset the dataframe to unique combinations of rank_group and guess_number, this makes it easier to add labels to the stacked bar plot later. Create `labely`, which is the y-axis values for where the labels should be added to the stacked barplot.
+
+```{r}
+#| label: df-for-plot
+#| code-overflow: wrap
+wordle_data_avg_percent_unique <- wordle_data_avg_percent %>% 
+  distinct(rank_group, guess_number, .keep_all=TRUE) %>% 
+  group_by(rank_group) %>% 
+  mutate(labely = cumsum(avg_percent))
+```
+
+Plot the data in a stacked barplot.
+
+```{r}
+#| label: stacked-barplot
+#| code-overflow: wrap
+ggplot(wordle_data_avg_percent_unique, aes(x = rank_group, y = avg_percent, fill = guess_number)) +
+  geom_col() +
+  geom_text(aes(y = labely, label = paste(format(round(avg_percent,1), nsmall = 1), "%")), vjust = 1.0, colour = "black", size = 2.5) +
+  scale_fill_discrete(labels = c("failed", "6 guesses", "5 guesses", "4 guesses", "3 guesses", "2 guesses", "1 guess")) +
+  labs(x = "Word commonness", y = "Percent of players", title = "Less common words require more guesses in Wordle", fill = "Number of guesses") +
+  theme_classic() +
+  theme(legend.title = element_text(face = "italic", family = "Times", size = 10),
+        title = element_text(face = "italic", family = "Times", size = 12)
+  )
+```
+
+### Scatterplot
+
+Another way to look at these data is to see if the number of people posting results on twitter has changed throughout the year. We can do this with a scatterplot and fitted line.
+
+```{r}
+#| label: scatterplot
+#| code-overflow: wrap
+ggplot(data = wordle_data, aes(x = date, y = number_results)) +
+  geom_point(shape=18) +
+  theme(axis.text.y = element_text(angle = 45)) +
+  labs(x = "Date", y = "Number of people", title = "How many people share their Wordle scores on Twitter?", caption = "Data from Twitter bot @WordleStats") +
+  geom_smooth(span = 0.3, lwd = 0.8) +
+  scale_x_date(breaks = scales::breaks_pretty(10)) +
+  scale_y_continuous(labels = comma) +
+   theme_classic() +
+  theme(axis.text.y = element_text(angle = 45))
+```
+
+### Lollipop chart
+
+For our last visualization, let's see if people score better on certain days of the week.
+
+Calculate the average number of guesses it takes to guess each Wordle (exclude those who failed).
+
+```{r}
+#| label: calc-wordle-avg
+#| code-overflow: wrap
+wordle_data_avg <- wordle_data %>% 
+  mutate(average = (((1*one_guess)+(2*two_guess)+(3*three_guess)+(4*four_guess)+(5*five_guess)+(6*six_guess))/(100-failed)))
+
+#overall average and round to 2 decimals - this will be used in plot
+mean <- mean(wordle_data_avg$average)
+mean <- round(mean, 2)
+```
+
+Add weekday as a variable using `wday` and calculate the average number of guesses it takes to guess the Wordle on each weekday.
+
+```{r}
+#| label: weekday-avg
+#| code-overflow: wrap
+wordle_data_day <- wordle_data_avg %>% 
+  mutate(day = lubridate::wday(date, label=TRUE)) %>% 
+  group_by(day) %>% 
+  mutate(avg_per_day = mean(average)) %>% 
+  ungroup()
+```
+
+Plot the data in a lollipop plot with the average number of guesses as a middle horizontal line.
+
+```{r}
+#| label: lollipop-plot
+#| code-overflow: wrap
+ggplot(wordle_data_day, aes(x=day, y=avg_per_day)) +
+  geom_segment(aes(x=day, xend=day, y=mean(average), yend=avg_per_day), color="skyblue") +
+  geom_point( color="blue", size=4, alpha=0.6) +
+  scale_x_discrete(limits = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))  +
+  geom_hline(yintercept=mean(wordle_data_day$average), linetype="dashed", 
+                color = "black", size=1) +
+  labs(x = "", y = "Average number of guesses", title = "Do people play Wordle better on certain days of the week?",
+       subtitle = "A look at how many guesses it takes to solve the Wordle, on average, each day of the week", caption = "Data from Twitter bot @WordleStats") +
+  theme_light() +
+  coord_flip() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  annotate(geom = "text",
+           x = 3.5,
+           y = 4.1,
+           size = 3,
+           color = "black",
+           lineheight = 0.9,
+           label = paste0("Overall average = ", mean))
+```
